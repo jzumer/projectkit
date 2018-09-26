@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="projectkit",
-    version="0.1.0",
+    version="0.1.1",
     author="Jeremie Zumer",
     author_email="jeremie.zumer@umontreal.ca",
     description="The ProjectKit project management system",

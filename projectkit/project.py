@@ -19,16 +19,16 @@ def save_dir(path, version):
         repo = git.Repo(path)
     except:
         repo = git.Repo.init(path, bare=True)
+        repo.git.init()
     
-    comm = repo.commit
-    repo.index.add(glob.glob(os.path.join(path, "*")))
-    repo.index.commit("Update " + str(version))
-
-    if repo.commit == comm:
+    repo.git.add("-A")
+    try:
+        repo.git.commit("-a", message='"Update ' + str(version) + '"')
+        repo.git.tag(str(version + 1))
+        return str(version + 1)
+    except:
         return str(version)
 
-    repo.create_tag(str(version + 1))
-    return str(version + 1)
 
 def hash_file(fname):
     md5 = hashlib.md5()
@@ -86,12 +86,12 @@ def init():
         os.mkdir('src/example')
         os.mkdir('data/example')
 
-        os.utime('__init__.py', None)
-        os.utime('src/__init__.py', None)
-        os.utime('data/__init__.py', None)
+        open('__init__.py', 'wa').close()
+        open('src/__init__.py', 'wa').close()
+        open('data/__init__.py', 'wa').close()
 
         src_main = open('src/example/main.py', 'w')
-        src_main.write("
+        src_main.write("""
 class Model:
     def __init__(self, val):
         self.val = val
@@ -131,11 +131,11 @@ def make_run(data, outdir, args):
             yield {'epoch': i, 'stats': json.dumps({'train:loss': loss, 'test:loss': loss})}, model
 
     return run()
-")
+""")
         src_main.close()
 
         data_gen = open('data/example/gen.py', 'w')
-        data_gen.write("
+        data_gen.write("""
 def run(fin, fout, args):
     if('do_it' in args and args['do_it'] == 'yes'):
         in_file = open(fin, 'r')
@@ -143,7 +143,7 @@ def run(fin, fout, args):
         out_file.write(in_file.read())
     else:
         print('couldn\'t generate anything')
-")
+""")
         data_gen.close()
 
         conn = sqlite3.connect("db/experiments.db")
@@ -187,9 +187,12 @@ def run(ctx, exp, key, data_key):
         cur.execute("SELECT fname, version FROM data WHERE key = ? ORDER BY version DESC LIMIT 1", (data_key,))
         data_fname, data_ver = cur.fetchone()
 
-        cur.execute("SELECT code_hash FROM expmeta WHERE exp = ? DESC LIMIT 1", (exp,))
+        cur.execute("SELECT code_hash FROM expmeta WHERE exp = ? ORDER BY code_hash DESC LIMIT 1", (exp,))
         ver = cur.fetchone()
-        ver = ver[0]
+        if ver is None:
+            ver = 1
+        else:
+            ver = ver[0]
 
         hashes = save_dir(os.path.join('src', key), ver)
 
@@ -207,7 +210,7 @@ def run(ctx, exp, key, data_key):
         except:
             pass
  
-        module = importlib.import_module(key + ".main")
+        module = importlib.import_module("src." + key + ".main")
         run_gen = module.make_run(os.path.join("data", data_fname), os.path.join("models", key), main_args)
 
         for stats, model in run_gen:
@@ -293,9 +296,11 @@ def data(verb, args):
         cur = conn.cursor()
 
         if verb == "gen":
-            # args[0] is the raw dataset, args[1] is the dataset name/keyword
-            from data import gen
-            cur.execute("SELECT version FROM data WHERE key = ? ORDER BY version DESC LIMIT 1", (args[1],))
+            # args[0] is the generator, args[1] is the raw dataset, args[2] is the dataset name/keyword
+
+            module = importlib.import_module("data." + args[0] + ".gen")
+
+            cur.execute("SELECT version FROM data WHERE key = ? ORDER BY version DESC LIMIT 1", (args[2],))
             prev_ver = cur.fetchone()
 
             if prev_ver is None:
@@ -304,19 +309,22 @@ def data(verb, args):
                 version = prev_ver[0] + 1
 
             vsuffix = "v{}.data".format(version)
-            fname = args[1] + vsuffix
-            short_fname = args[1].rsplit('/', 1)[1] + vsuffix
+            fname = args[2] + vsuffix
+            short_fname = args[2].rsplit('/', 1)[-1] + vsuffix
 
-            cur.execute("SELECT code_hash FROM data WHERE key = ? DESC LIMIT 1", (args[1],))
+            cur.execute("SELECT code_hash FROM data WHERE key = ? ORDER BY code_hash DESC LIMIT 1", (args[2],))
             ver = cur.fetchone()
-            ver = ver[0]
+            if ver is None:
+                ver = 1
+            else:
+                ver = ver[0]
 
-            hashes = save_dir(os.path.join('data', args[1]), ver)
+            hashes = save_dir(os.path.join('data', args[2]), ver)
 
-            params = gather_params(args[2:])
-            cur.execute("INSERT INTO data (key, fname, version, hash, code_hash, params) VALUES (?, ?, ?, ?, ?, ?)", (args[1], short_fname, version, "", hashes, json.dumps(params)))
+            params = gather_params(args[3:])
+            cur.execute("INSERT INTO data (key, fname, version, hash, code_hash, params) VALUES (?, ?, ?, ?, ?, ?)", (args[2], short_fname, version, "", hashes, json.dumps(params)))
             conn.commit()
-            gen.run(args[0], os.path.join("data", fname), params)
+            module.run(args[1], os.path.join("data", fname), params)
 
             filehash = hash_file(os.path.join("data", fname))
             cur.execute("UPDATE data SET hash = ? WHERE fname = ?", (filehash, fname))
