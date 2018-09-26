@@ -8,9 +8,27 @@ import json
 import datetime
 import glob
 import traceback
+import importlib
+import git
 
 def gather_params(args):
     return {args[i].lstrip('-'): args[i+1] for i in range(0, len(args), 2)}
+
+def save_dir(path, version):
+    try:
+        repo = git.Repo(path)
+    except:
+        repo = git.Repo.init(path, bare=True)
+    
+    comm = repo.commit
+    repo.index.add(glob.glob(os.path.join(path, "*")))
+    repo.index.commit("Update " + str(version))
+
+    if repo.commit == comm:
+        return str(version)
+
+    repo.create_tag(str(version + 1))
+    return str(version + 1)
 
 def hash_file(fname):
     md5 = hashlib.md5()
@@ -65,15 +83,74 @@ def init():
         os.mkdir('models')
         os.mkdir('models/logs')
 
+        os.mkdir('src/example')
+        os.mkdir('data/example')
+
         os.utime('__init__.py', None)
         os.utime('src/__init__.py', None)
         os.utime('data/__init__.py', None)
 
+        src_main = open('src/example/main.py', 'w')
+        src_main.write("
+class Model:
+    def __init__(self, val):
+        self.val = val
+
+    def save(self, fout):
+        out = open(fout, 'w')
+        out.write(self.val)
+        out.close()
+
+def make_run(data, outdir, args):
+    # Return a generator that runs for one epoch per iteration
+    import cPickle
+    import json
+
+    # Generated data is usually a pkl
+    data = cPickle.load(data)
+    
+    # Define a generator
+    def run():
+        i = -1
+        min_loss = 101
+        while True:
+            i += 1
+            model = None
+
+            val = data['train'][i % len(data)]
+            if val < 3:
+                loss = val
+            else:
+                loss = 100
+            if loss < min_loss:
+                model = Model(loss)
+                min_loss = loss
+
+            # The generator always yields two items: a dictionary with the epoch number and json data to dump to the database,
+            # and the model to save if applicable (None if no model should be saved, an object with the defined method save(self, filename) otherwise)
+            yield {'epoch': i, 'stats': json.dumps({'train:loss': loss, 'test:loss': loss})}, model
+
+    return run()
+")
+        src_main.close()
+
+        data_gen = open('data/example/gen.py', 'w')
+        data_gen.write("
+def run(fin, fout, args):
+    if('do_it' in args and args['do_it'] == 'yes'):
+        in_file = open(fin, 'r')
+        out_file = open(fout, 'w')
+        out_file.write(in_file.read())
+    else:
+        print('couldn\'t generate anything')
+")
+        data_gen.close()
+
         conn = sqlite3.connect("db/experiments.db")
         cur = conn.cursor()
 
-        cur.execute("CREATE TABLE data (id INTEGER PRIMARY KEY AUTOINCREMENT, fname TEXT NOT NULL, hash TEXT, version INT NOT NULL DEFAULT(1), key TEXT NOT NULL, params TEXT)")
-        cur.execute("CREATE TABLE expmeta (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, data_key INT, data_ver INT NOT NULL, params TEXT, FOREIGN KEY (data_key) REFERENCES data (id))")
+        cur.execute("CREATE TABLE data (id INTEGER PRIMARY KEY AUTOINCREMENT, fname TEXT NOT NULL, hash TEXT, code_hash TEXT, version INT NOT NULL DEFAULT(1), key TEXT NOT NULL, params TEXT)")
+        cur.execute("CREATE TABLE expmeta (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, data_key INT, data_ver INT NOT NULL, code_hash TEXT, params TEXT, FOREIGN KEY (data_key) REFERENCES data (id))")
         cur.execute("CREATE TABLE expres (id INTEGER PRIMARY KEY AUTOINCREMENT, exp INT NOT NULL, fname TEXT, epoch INT NOT NULL, result TEXT NOT NULL, FOREIGN KEY (exp) REFERENCES expmeta (id))")
         conn.commit()
 
@@ -89,10 +166,11 @@ def init():
         ignore_unknown_options=True,
         allow_extra_args=True)
 )
+@click.argument("exp") # experiment
 @click.argument("key") # exp name
 @click.argument("data_key") # data name
 @click.pass_context
-def run(ctx, key, data_key):
+def run(ctx, exp, key, data_key):
     """Run project. Trailing arguments of the form --key value are passed to the called module."""
 
     idx = len(glob.glob("models/logs/{}_*.out".format(key)))
@@ -109,7 +187,13 @@ def run(ctx, key, data_key):
         cur.execute("SELECT fname, version FROM data WHERE key = ? ORDER BY version DESC LIMIT 1", (data_key,))
         data_fname, data_ver = cur.fetchone()
 
-        cur.execute('INSERT INTO expmeta (key, data_key, data_ver, params) VALUES (?, ?, ?, ?)', (key, data_key, data_ver, json.dumps(main_args)))
+        cur.execute("SELECT code_hash FROM expmeta WHERE exp = ? DESC LIMIT 1", (exp,))
+        ver = cur.fetchone()
+        ver = ver[0]
+
+        hashes = save_dir(os.path.join('src', key), ver)
+
+        cur.execute('INSERT INTO expmeta (key, exp, data_key, data_ver, code_hash, params) VALUES (?, ?, ?, ?, ?, ?)', (key, exp, data_key, data_ver, hashes, json.dumps(main_args)))
         conn.commit()
 
         cur.execute("SELECT last_insert_rowid()")
@@ -123,8 +207,8 @@ def run(ctx, key, data_key):
         except:
             pass
  
-        from src import main
-        run_gen = main.make_run(os.path.join("data", data_fname), os.path.join("models", key), main_args)
+        module = importlib.import_module(key + ".main")
+        run_gen = module.make_run(os.path.join("data", data_fname), os.path.join("models", key), main_args)
 
         for stats, model in run_gen:
             save_fname = None
@@ -219,10 +303,18 @@ def data(verb, args):
             else:
                 version = prev_ver[0] + 1
 
-            fname = args[1] + "v{}.data".format(version)
+            vsuffix = "v{}.data".format(version)
+            fname = args[1] + vsuffix
+            short_fname = args[1].rsplit('/', 1)[1] + vsuffix
+
+            cur.execute("SELECT code_hash FROM data WHERE key = ? DESC LIMIT 1", (args[1],))
+            ver = cur.fetchone()
+            ver = ver[0]
+
+            hashes = save_dir(os.path.join('data', args[1]), ver)
 
             params = gather_params(args[2:])
-            cur.execute("INSERT INTO data (key, fname, version, hash, params) VALUES (?, ?, ?, ?, ?)", (args[1], fname, version, "", json.dumps(params)))
+            cur.execute("INSERT INTO data (key, fname, version, hash, code_hash, params) VALUES (?, ?, ?, ?, ?, ?)", (args[1], short_fname, version, "", hashes, json.dumps(params)))
             conn.commit()
             gen.run(args[0], os.path.join("data", fname), params)
 
