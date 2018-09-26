@@ -1,0 +1,8 @@
+README.md
+setup.py
+projectkit/__init__.py
+projectkit/project.py
+projectkit.egg-info/PKG-INFO
+projectkit.egg-info/SOURCES.txt
+projectkit.egg-info/dependency_links.txt
+projectkit.egg-info/top_level.txt
