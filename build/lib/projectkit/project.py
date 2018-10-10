@@ -187,7 +187,7 @@ def run(ctx, exp, key, data_key):
         cur.execute("SELECT fname, version FROM data WHERE key = ? ORDER BY version DESC LIMIT 1", (data_key,))
         data_fname, data_ver = cur.fetchone()
 
-        cur.execute("SELECT code_hash FROM expmeta WHERE exp = ? ORDER BY code_hash DESC LIMIT 1", (exp,))
+        cur.execute("SELECT code_hash FROM expmeta WHERE key = ? ORDER BY code_hash DESC LIMIT 1", (key,))
         ver = cur.fetchone()
         if ver is None:
             ver = 1
@@ -196,7 +196,7 @@ def run(ctx, exp, key, data_key):
 
         hashes = save_dir(os.path.join('src', key), ver)
 
-        cur.execute('INSERT INTO expmeta (key, exp, data_key, data_ver, code_hash, params) VALUES (?, ?, ?, ?, ?, ?)', (key, exp, data_key, data_ver, hashes, json.dumps(main_args)))
+        cur.execute('INSERT INTO expmeta (key, data_key, data_ver, code_hash, params) VALUES (?, ?, ?, ?, ?)', (key,  data_key, data_ver, hashes, json.dumps(main_args)))
         conn.commit()
 
         cur.execute("SELECT last_insert_rowid()")
@@ -210,7 +210,7 @@ def run(ctx, exp, key, data_key):
         except:
             pass
  
-        module = importlib.import_module("src." + key + ".main")
+        module = importlib.import_module("src." + exp + ".main")
         run_gen = module.make_run(os.path.join("data", data_fname), os.path.join("models", key), main_args)
 
         for stats, model in run_gen:
@@ -319,7 +319,7 @@ def data(verb, args):
             else:
                 ver = ver[0]
 
-            hashes = save_dir(os.path.join('data', args[2]), ver)
+            hashes = save_dir(os.path.join('data', args[0]), ver)
 
             params = gather_params(args[3:])
             cur.execute("INSERT INTO data (key, fname, version, hash, code_hash, params) VALUES (?, ?, ?, ?, ?, ?)", (args[2], short_fname, version, "", hashes, json.dumps(params)))
